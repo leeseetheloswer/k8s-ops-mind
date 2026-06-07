@@ -59,6 +59,7 @@ k8s-ops-agent/
 - CLI 模式：Rich 交互终端
 - 危险操作（删除、扩缩容、apply manifest）有两阶段确认机制
 - 后端定时巡检，通过 SSE 推送告警到前端（橙色告警气泡，与对话消息区分）
+- 故障知识库（SQLite）：每次诊断结束后自动提取案例存库；下次问类似问题时检索注入上下文
 
 ## 危险操作确认机制
 
@@ -88,6 +89,21 @@ k8s-ops-agent/
 **新增检测项**：在 `inspector/checks.py` 写函数返回 `list[Anomaly]`，加入 `ALL_CHECKS` 列表。
 
 **前端告警**：`role='alert'` 消息渲染为橙色左侧边框气泡，与普通对话气泡明显区分。
+
+## 故障知识库（KB）
+
+`kb/` 目录实现了 SQLite 本地知识库，数据存在 `data/kb.db`（gitignore 排除）。
+
+**存储流程**：每次 `/api/chat` 或 `/api/confirm` 返回后，在后台 daemon 线程中：
+1. `kb.extractor.should_extract()` 做廉价关键词启发判断（含"根因/诊断/建议"等词 + 长度 ≥ 80）
+2. 通过 `kb.extractor.extract_case()` 调一次 LLM（独立调用，不污染会话 history），提取 JSON：symptom / root_cause / solution / resource_kind / resource_name / namespace
+3. `kb.case_store.save_case()` 入库，同时生成 keyword 索引
+
+**会话重置时**：`/api/reset` 在清空 history 前触发一次提取（跳过启发词门槛，直接调 LLM），适合完整诊断完成后手动开新会话的场景。
+
+**检索注入流程**：每次 `/api/chat` 时，先 `search_cases(req.message)` 做关键词 LIKE 评分检索，命中则通过 `format_cases_for_context()` 格式化为头部上下文，拼接到用户消息前一起送给 agent。
+
+**升级路径**：目前关键词 LIKE 评分，只需替换 `search_cases()` 实现即可升级到语义检索（embedding + cosine），其余 API 不变。
 
 ## 关键约定
 

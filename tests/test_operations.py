@@ -110,14 +110,22 @@ class TestGetLogs:
         result = ops.get_logs("nginx-abc")
         assert "line1" in result
         mock_k8s_client.core.read_namespaced_pod_log.assert_called_once_with(
-            name="nginx-abc", namespace="default", tail_lines=50
+            name="nginx-abc", namespace="default", tail_lines=50, previous=False
         )
 
     def test_custom_tail_lines(self, ops, mock_k8s_client):
         mock_k8s_client.core.read_namespaced_pod_log.return_value = ""
         ops.get_logs("nginx-abc", tail_lines=100)
         mock_k8s_client.core.read_namespaced_pod_log.assert_called_once_with(
-            name="nginx-abc", namespace="default", tail_lines=100
+            name="nginx-abc", namespace="default", tail_lines=100, previous=False
+        )
+
+    def test_previous_flag_passed_through(self, ops, mock_k8s_client):
+        mock_k8s_client.core.read_namespaced_pod_log.return_value = "crash log"
+        result = ops.get_logs("crash-pod", previous=True)
+        assert result == "crash log"
+        mock_k8s_client.core.read_namespaced_pod_log.assert_called_once_with(
+            name="crash-pod", namespace="default", tail_lines=50, previous=True
         )
 
     def test_api_exception_returns_error_string(self, ops, mock_k8s_client):

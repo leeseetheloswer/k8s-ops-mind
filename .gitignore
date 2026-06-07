@@ -11,5 +11,8 @@ __pycache__/
 frontend/node_modules/
 frontend/dist/
 
+# 知识库数据（SQLite，本地持久化）
+data/
+
 # 系统文件
 .DS_Store

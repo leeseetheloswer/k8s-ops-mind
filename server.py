@@ -3,6 +3,7 @@ FastAPI backend — wraps K8sAgent and exposes a REST API for the React frontend
 """
 import asyncio
 import json
+import threading
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -17,6 +18,8 @@ from k8s.operations import K8sOperations
 from agent.factory import create_agent
 from agent.confirmation import ConfirmationRequired
 from inspector.inspector import Inspector
+from kb.case_store import init_db, search_cases, format_cases_for_context, save_case
+from kb.extractor import extract_case, should_extract
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -27,12 +30,72 @@ _inspector: Inspector | None = None
 
 
 # ------------------------------------------------------------------ #
-# Lifespan — start/stop background inspector
+# KB background helpers
+# ------------------------------------------------------------------ #
+
+def _bg_extract(history_snapshot: list, last_reply: str) -> None:
+    """Save a fault case if the conversation contains a root-cause conclusion."""
+    try:
+        if not should_extract(history_snapshot, last_reply):
+            return
+        case = extract_case(history_snapshot)
+        if case:
+            cid = save_case(
+                symptom=case.get('symptom', ''),
+                root_cause=case.get('root_cause', ''),
+                solution=case.get('solution', ''),
+                resource_kind=case.get('resource_kind', ''),
+                resource_name=case.get('resource_name', ''),
+                namespace=case.get('namespace', ''),
+            )
+            logger.info(f"KB: saved case #{cid} — {case.get('symptom','')[:60]}")
+    except Exception as exc:
+        logger.error(f"KB extraction error: {exc}")
+
+
+def _bg_extract_on_reset(history_snapshot: list) -> None:
+    """Triggered on session reset — extract without the heuristic keyword gate."""
+    if len(history_snapshot) < 6:
+        return
+    try:
+        case = extract_case(history_snapshot)
+        if case:
+            cid = save_case(
+                symptom=case.get('symptom', ''),
+                root_cause=case.get('root_cause', ''),
+                solution=case.get('solution', ''),
+                resource_kind=case.get('resource_kind', ''),
+                resource_name=case.get('resource_name', ''),
+                namespace=case.get('namespace', ''),
+            )
+            logger.info(f"KB (reset): saved case #{cid} — {case.get('symptom','')[:60]}")
+    except Exception as exc:
+        logger.error(f"KB extraction (reset) error: {exc}")
+
+
+def _spawn_extract(history_snapshot: list, last_reply: str) -> None:
+    threading.Thread(target=_bg_extract, args=(history_snapshot, last_reply), daemon=True).start()
+
+
+def _spawn_extract_on_reset(history_snapshot: list) -> None:
+    threading.Thread(target=_bg_extract_on_reset, args=(history_snapshot,), daemon=True).start()
+
+
+# ------------------------------------------------------------------ #
+# Lifespan — start/stop background inspector, init DB
 # ------------------------------------------------------------------ #
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _inspector
+
+    # Always initialise KB (creates tables if absent)
+    try:
+        init_db()
+        logger.info("KB: database ready")
+    except Exception as e:
+        logger.error(f"KB init failed: {e}")
+
     _inspector_task = None
     if settings.inspector_enabled:
         try:
@@ -52,8 +115,14 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Inspector init failed (K8s unavailable?): {e}")
     yield
+    if _inspector:
+        _inspector.stop()
     if _inspector_task:
         _inspector_task.cancel()
+        try:
+            await asyncio.wait_for(_inspector_task, timeout=3)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
 
 
 app = FastAPI(title="K8s Ops Agent API", lifespan=lifespan)
@@ -112,9 +181,17 @@ def chat(req: ChatRequest):
             session_id=req.session_id,
             pending_action={"description": desc},
         )
+
     agent = _get_agent(req.session_id)
+
+    # Prepend relevant KB cases as context
+    cases = search_cases(req.message)
+    kb_context = format_cases_for_context(cases)
+    message = f"{kb_context}\n{req.message}" if kb_context else req.message
+
     try:
-        reply = agent.chat(req.message)
+        reply = agent.chat(message)
+        _spawn_extract(list(agent.history), reply)
         return ChatResponse(reply=reply, session_id=req.session_id)
     except ConfirmationRequired as e:
         _pending[req.session_id] = {
@@ -148,6 +225,7 @@ def confirm(req: ConfirmRequest):
             pending["tool_id"],
             pending.get("assistant_msg"),
         )
+        _spawn_extract(list(agent.history), reply)
         return ChatResponse(reply=reply, session_id=req.session_id)
     except ConfirmationRequired as e:
         # Rare: another dangerous op follows immediately
@@ -168,7 +246,9 @@ def confirm(req: ConfirmRequest):
 @app.post("/api/reset")
 def reset(session_id: str):
     if session_id in _sessions:
-        _sessions[session_id].reset()
+        agent = _sessions[session_id]
+        _spawn_extract_on_reset(list(agent.history))
+        agent.reset()
     _pending.pop(session_id, None)
     return {"ok": True}
 

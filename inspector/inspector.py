@@ -4,6 +4,7 @@ broadcasts alerts to all connected SSE clients, and fires any registered notifie
 """
 import asyncio
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -11,6 +12,7 @@ from inspector.checks import ALL_CHECKS, Anomaly, check_pod_restarts
 from inspector.notifier import AlertNotifier, LogNotifier
 from k8s.operations import K8sOperations
 from utils.json_util import dumps as json_dumps
+from utils.log_filter import filter_logs_for_llm
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -34,6 +36,8 @@ class Inspector:
         self._notifiers: list[AlertNotifier] = notifiers or [LogNotifier()]
         self._seen: dict[str, datetime] = {}
         self._listeners: list[asyncio.Queue] = []
+        self._stopped = False
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="inspector-llm")
 
     # ── SSE subscription ────────────────────────────────────────────── #
 
@@ -63,24 +67,59 @@ class Inspector:
     # ── LLM diagnosis ───────────────────────────────────────────────── #
 
     def _build_prompt(self, anomaly: Anomaly) -> str:
+        """Build the LLM diagnosis prompt. May call K8s API for logs — runs in thread pool."""
+        ns = anomaly.namespace or "cluster"
+        resource_id = f"{anomaly.kind} {ns}/{anomaly.name}"
+
+        log_section = ""
+        if anomaly.kind == "Pod" and anomaly.namespace:
+            # For crash/restart anomalies, the previous container's logs capture the
+            # actual failure; current logs may be empty or show a fresh (healthy) start.
+            use_previous = anomaly.check_type == "high_restarts"
+            raw = self._ops.get_logs(
+                anomaly.name, anomaly.namespace,
+                tail_lines=200, previous=use_previous,
+            )
+            # Fall back to current logs if previous are unavailable
+            if use_previous and raw.startswith("Error:"):
+                raw = self._ops.get_logs(anomaly.name, anomaly.namespace, tail_lines=200)
+            label = "上一次崩溃日志" if use_previous else "近期日志"
+            filtered = filter_logs_for_llm(raw, context_lines=3, max_duplicates=3)
+            log_section = f"\n**{label}（预处理后）**：\n```\n{filtered}\n```\n"
+
         return (
-            "以下是 Kubernetes 集群巡检发现的一个异常，请分析原因并给出排查建议：\n\n"
-            f"**资源**：{anomaly.kind} {anomaly.namespace}/{anomaly.name}\n"
-            f"**摘要**：{anomaly.summary}\n"
-            f"**详情**：\n```json\n{json_dumps(anomaly.details, indent=2)}\n```\n\n"
-            "请直接给出诊断结论和具体操作建议，不超过 200 字。"
+            f"Kubernetes 集群巡检发现异常，请分析并给出排查建议。\n\n"
+            f"**受影响资源**：{resource_id}\n"
+            f"**异常摘要**：{anomaly.summary}\n"
+            f"**资源详情**：\n```json\n{json_dumps(anomaly.details, indent=2)}\n```"
+            f"{log_section}\n"
+            f"要求：\n"
+            f"1. 回答开头必须写明受影响的资源全名（{resource_id}）\n"
+            f"2. 给出诊断结论（是否真的有问题，原因是什么）\n"
+            f"3. 给出具体操作建议（kubectl 命令优先）\n"
+            f"4. 不超过 200 字"
         )
 
-    async def _diagnose(self, anomaly: Anomaly) -> str:
+    def _diagnose_sync(self, anomaly: Anomaly) -> str:
+        """Blocking: fetch logs, build prompt, call LLM. Runs entirely in thread pool."""
         prompt = self._build_prompt(anomaly)
+        self._agent.reset()
+        return self._agent.chat(prompt)
+
+    def stop(self) -> None:
+        """Signal the inspector to stop and cancel any pending LLM calls."""
+        self._stopped = True
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+    async def _diagnose(self, anomaly: Anomaly) -> str:
+        if self._stopped:
+            return ""
         loop = asyncio.get_event_loop()
         try:
-            # agent.chat is synchronous — run in thread pool to avoid blocking event loop
-            self._agent.reset()
-            return await loop.run_in_executor(None, self._agent.chat, prompt)
+            return await loop.run_in_executor(self._executor, self._diagnose_sync, anomaly)
         except Exception as e:
-            logger.error(f"Diagnosis LLM call failed: {e}")
-            return f"（LLM 诊断失败: {e}）"
+            logger.error(f"Diagnosis failed: {e}")
+            return f"（诊断失败: {e}）"
 
     # ── Broadcast & notify ──────────────────────────────────────────── #
 

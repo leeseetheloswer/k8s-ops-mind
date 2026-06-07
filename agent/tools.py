@@ -67,13 +67,14 @@ TOOLS: list[dict] = [
     },
     {
         "name": "get_logs",
-        "description": "获取 Pod 的日志",
+        "description": "获取 Pod 的日志。CrashLoopBackOff 场景下建议先用 previous=true 获取上一次崩溃的日志，比当前日志更能定位崩溃原因。",
         "input_schema": {
             "type": "object",
             "properties": {
-                "pod_name":   {"type": "string", "description": "Pod 名称"},
-                "namespace":  {"type": "string", "description": "命名空间"},
+                "pod_name":   {"type": "string",  "description": "Pod 名称"},
+                "namespace":  {"type": "string",  "description": "命名空间"},
                 "tail_lines": {"type": "integer", "description": "返回最后 N 行，默认 50"},
+                "previous":   {"type": "boolean", "description": "true 则返回上一次（已崩溃）容器的日志，用于 CrashLoopBackOff 排查"},
             },
             "required": ["pod_name"],
         },

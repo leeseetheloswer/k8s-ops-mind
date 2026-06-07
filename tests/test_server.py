@@ -8,7 +8,11 @@ from agent.confirmation import ConfirmationRequired
 def client():
     with patch("k8s.client.K8sClient.connect", return_value=True), \
          patch("agent.agent.anthropic.Anthropic"), \
-         patch("agent.factory.settings") as ms:
+         patch("agent.factory.settings") as ms, \
+         patch("server.init_db"), \
+         patch("server.search_cases", return_value=[]), \
+         patch("server._spawn_extract"), \
+         patch("server._spawn_extract_on_reset"):
         ms.llm_provider = "anthropic"
         ms.anthropic_api_key = "sk-test"
         ms.anthropic_model = "claude-opus-4-8"

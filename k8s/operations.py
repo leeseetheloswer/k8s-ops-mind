@@ -160,13 +160,15 @@ class K8sOperations:
         except ApiException as e:
             return {"error": str(e)}
 
-    def get_logs(self, pod_name: str, namespace: str | None = None, tail_lines: int = 50) -> str:
+    def get_logs(self, pod_name: str, namespace: str | None = None,
+                 tail_lines: int = 50, previous: bool = False) -> str:
         ns = namespace or self.client.namespace
         try:
             return self.client.core.read_namespaced_pod_log(
                 name=pod_name,
                 namespace=ns,
                 tail_lines=tail_lines,
+                previous=previous,
             )
         except ApiException as e:
             return f"Error: {e}"

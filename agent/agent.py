@@ -14,7 +14,7 @@ logger = get_logger(__name__)
 class K8sAgent:
     def __init__(self, ops: K8sOperations):
         self.ops = ops
-        self.client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        self.client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=30)
         self._model = settings.anthropic_model
         self.history: list[dict[str, Any]] = []
 
