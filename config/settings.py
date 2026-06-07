@@ -5,22 +5,22 @@ from typing import Optional
 
 class Settings(BaseSettings):
     # Provider selection: "anthropic" | "deepseek"
-    llm_provider: str = Field("anthropic", env="LLM_PROVIDER")
+    llm_provider: str = "anthropic"
 
     # Anthropic
-    anthropic_api_key: Optional[str] = Field(None, env="ANTHROPIC_API_KEY")
-    anthropic_model: str = Field("claude-opus-4-8", env="ANTHROPIC_MODEL")
+    anthropic_api_key: Optional[str] = None
+    anthropic_model: str = "claude-opus-4-8"
 
     # DeepSeek (OpenAI-compatible)
-    deepseek_api_key: Optional[str] = Field(None, env="DEEPSEEK_API_KEY")
-    deepseek_base_url: str = Field("https://api.deepseek.com", env="DEEPSEEK_BASE_URL")
-    deepseek_model: str = Field("deepseek-chat", env="DEEPSEEK_MODEL")
+    deepseek_api_key: Optional[str] = None
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_model: str = "deepseek-chat"
 
     # Shared
-    agent_max_tokens: int = Field(4096, env="AGENT_MAX_TOKENS")
-    kubeconfig: str = Field("~/.kube/config", env="KUBECONFIG")
-    k8s_namespace: str = Field("default", env="K8S_NAMESPACE")
-    log_level: str = Field("INFO", env="LOG_LEVEL")
+    agent_max_tokens: int = 4096
+    kubeconfig: str = "~/.kube/config"
+    k8s_namespace: str = "default"
+    log_level: str = "INFO"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
