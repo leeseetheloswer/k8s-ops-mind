@@ -3,6 +3,7 @@ import Header from './components/Header.jsx'
 import Sidebar from './components/Sidebar.jsx'
 import ChatMessage from './components/ChatMessage.jsx'
 import ChatInput from './components/ChatInput.jsx'
+import ConfirmModal from './components/ConfirmModal.jsx'
 import styles from './App.module.css'
 
 const STORAGE_KEY = 'k8s_messages'
@@ -39,6 +40,7 @@ export default function App() {
   const [messages, setMessages] = useState(loadMessages)
   const [loading, setLoading] = useState(false)
   const [health, setHealth] = useState(null)
+  const [pendingAction, setPendingAction] = useState(null)  // {description}
   const sessionId = useRef(getSessionId())
   const bottomRef = useRef(null)
 
@@ -69,6 +71,9 @@ export default function App() {
         body: JSON.stringify({ message: text, session_id: sessionId.current }),
       })
       const data = await res.json()
+      if (data.pending_action) {
+        setPendingAction(data.pending_action)
+      }
       setMessages(prev => [...prev, { role: 'assistant', content: data.reply }])
     } catch {
       setMessages(prev => [...prev, {
@@ -76,6 +81,25 @@ export default function App() {
         content: '⚠️ 请求失败，请检查后端服务是否正常运行。',
         error: true,
       }])
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  const handleConfirm = useCallback(async (confirmed) => {
+    setPendingAction(null)
+    setLoading(true)
+    try {
+      const res = await fetch('/api/confirm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId.current, confirmed }),
+      })
+      const data = await res.json()
+      if (data.pending_action) setPendingAction(data.pending_action)
+      setMessages(prev => [...prev, { role: 'assistant', content: data.reply }])
+    } catch {
+      setMessages(prev => [...prev, { role: 'assistant', content: '⚠️ 请求失败。', error: true }])
     } finally {
       setLoading(false)
     }
@@ -100,9 +124,16 @@ export default function App() {
             {loading && <ChatMessage role="assistant" content="" loading />}
             <div ref={bottomRef} />
           </div>
-          <ChatInput onSend={sendMessage} disabled={loading} />
+          <ChatInput onSend={sendMessage} disabled={loading || !!pendingAction} />
         </main>
       </div>
+      {pendingAction && (
+        <ConfirmModal
+          description={pendingAction.description}
+          onConfirm={() => handleConfirm(true)}
+          onCancel={() => handleConfirm(false)}
+        />
+      )}
     </div>
   )
 }

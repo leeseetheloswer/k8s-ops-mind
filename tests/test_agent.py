@@ -1,7 +1,7 @@
-import json
 import pytest
 from unittest.mock import MagicMock, patch
 from k8s.operations import K8sOperations
+from agent.confirmation import ConfirmationRequired
 
 
 def _make_text_block(text="done"):
@@ -82,6 +82,78 @@ class TestK8sAgentChat:
         agent.history = [{"role": "user", "content": "test"}]
         agent.reset()
         assert agent.history == []
+
+
+class TestK8sAgentConfirmation:
+    def test_dangerous_tool_raises_confirmation_required(self, agent):
+        tool_block = _make_tool_use_block(
+            "scale_deployment",
+            {"name": "nginx", "replicas": 0, "namespace": "default"},
+            "t-danger",
+        )
+        agent.client.messages.create.return_value = _make_response("tool_use", [tool_block])
+
+        with pytest.raises(ConfirmationRequired) as exc_info:
+            agent.chat("把 nginx 缩为 0")
+
+        cr = exc_info.value
+        assert cr.tool_name == "scale_deployment"
+        assert cr.tool_id == "t-danger"
+        assert "nginx" in cr.description
+
+    def test_dangerous_tool_rolls_back_history(self, agent):
+        """assistant(tool_use) must be removed from history before raising."""
+        tool_block = _make_tool_use_block(
+            "scale_deployment",
+            {"name": "nginx", "replicas": 0},
+            "t-danger",
+        )
+        agent.client.messages.create.return_value = _make_response("tool_use", [tool_block])
+
+        with pytest.raises(ConfirmationRequired) as exc_info:
+            agent.chat("缩容")
+
+        # history contains only the user message — assistant was rolled back
+        assert len(agent.history) == 1
+        assert agent.history[0]["role"] == "user"
+        assert exc_info.value.assistant_msg is not None
+
+    def test_execute_confirmed_re_appends_assistant_msg(self, agent):
+        """execute_confirmed must prepend assistant_msg before tool result."""
+        agent.ops.scale_deployment = MagicMock(return_value={"ok": True})
+        agent.client.messages.create.return_value = _make_response(
+            "end_turn", [_make_text_block("已缩容")]
+        )
+
+        fake_assistant_msg = {"role": "assistant", "content": [MagicMock()]}
+        reply = agent.execute_confirmed(
+            "scale_deployment",
+            {"name": "nginx", "replicas": 0, "namespace": "default"},
+            "t-danger",
+            assistant_msg=fake_assistant_msg,
+        )
+
+        assert reply == "已缩容"
+        assert agent.history[0] == fake_assistant_msg
+        tool_result_msg = agent.history[1]
+        assert tool_result_msg["role"] == "user"
+        assert tool_result_msg["content"][0]["type"] == "tool_result"
+        assert tool_result_msg["content"][0]["tool_use_id"] == "t-danger"
+
+    def test_execute_confirmed_without_assistant_msg(self, agent):
+        """execute_confirmed with assistant_msg=None does not crash."""
+        agent.ops.scale_deployment = MagicMock(return_value={"ok": True})
+        agent.client.messages.create.return_value = _make_response(
+            "end_turn", [_make_text_block("完成")]
+        )
+
+        reply = agent.execute_confirmed(
+            "scale_deployment",
+            {"name": "nginx", "replicas": 1, "namespace": "default"},
+            "t-x",
+            assistant_msg=None,
+        )
+        assert reply == "完成"
 
 
 class TestK8sAgentToolDispatch:
