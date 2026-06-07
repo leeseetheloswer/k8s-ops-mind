@@ -51,6 +51,24 @@ export default function App() {
       .catch(() => setHealth({ status: 'error' }))
   }, [])
 
+  // SSE: subscribe to inspector alerts
+  useEffect(() => {
+    const es = new EventSource('/api/alerts/stream')
+    es.onmessage = (e) => {
+      const data = JSON.parse(e.data)
+      if (data.type === 'connected' || data.type === 'disabled') return
+      setMessages(prev => [...prev, {
+        role: 'alert',
+        content: data.diagnosis || data.summary,
+        alert: data,
+      }])
+    }
+    es.onerror = () => {
+      // EventSource auto-reconnects; no action needed
+    }
+    return () => es.close()
+  }, [])
+
   useEffect(() => {
     saveMessages(messages)
   }, [messages])

@@ -28,9 +28,31 @@ const mdComponents = {
   },
 }
 
-export default function ChatMessage({ role, content, loading, error }) {
-  const isUser = role === 'user'
+function AlertBubble({ alert, content }) {
+  return (
+    <div className={`${styles.row} ${styles.alertRow}`}>
+      <div className={`${styles.avatar} ${styles.alertAvatar}`}>⚠</div>
+      <div className={`${styles.bubble} ${styles.alertBubble}`}>
+        <p className={styles.alertSummary}>{alert?.summary}</p>
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+          {content}
+        </ReactMarkdown>
+        {alert?.timestamp && (
+          <p className={styles.alertTime}>
+            {new Date(alert.timestamp).toLocaleTimeString()}
+            {' · '}
+            {alert.kind} {alert.namespace ? `${alert.namespace}/` : ''}{alert.name}
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
 
+export default function ChatMessage({ role, content, loading, error, alert }) {
+  if (role === 'alert') return <AlertBubble alert={alert} content={content} />
+
+  const isUser = role === 'user'
   return (
     <div className={`${styles.row} ${isUser ? styles.userRow : styles.assistantRow}`}>
       <div className={styles.avatar}>

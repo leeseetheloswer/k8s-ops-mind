@@ -1,18 +1,62 @@
 """
 FastAPI backend — wraps K8sAgent and exposes a REST API for the React frontend.
 """
+import asyncio
+import json
+from contextlib import asynccontextmanager
+from typing import Any
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Any
 
 from config.settings import settings
 from k8s.client import K8sClient
 from k8s.operations import K8sOperations
 from agent.factory import create_agent
 from agent.confirmation import ConfirmationRequired
+from inspector.inspector import Inspector
+from utils.logger import get_logger
 
-app = FastAPI(title="K8s Ops Agent API")
+logger = get_logger(__name__)
+
+_sessions: dict = {}
+_pending: dict = {}   # session_id → {tool_name, tool_input, tool_id, description, assistant_msg}
+_inspector: Inspector | None = None
+
+
+# ------------------------------------------------------------------ #
+# Lifespan — start/stop background inspector
+# ------------------------------------------------------------------ #
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _inspector
+    _inspector_task = None
+    if settings.inspector_enabled:
+        try:
+            client = K8sClient(kubeconfig=settings.kubeconfig, namespace=settings.k8s_namespace)
+            client.connect()
+            ops = K8sOperations(client)
+            agent = create_agent(ops)
+            _inspector = Inspector(
+                ops=ops,
+                agent=agent,
+                interval=settings.inspector_interval,
+                cooldown_minutes=settings.inspector_cooldown_minutes,
+                restart_threshold=settings.inspector_restart_threshold,
+            )
+            _inspector_task = asyncio.create_task(_inspector.start())
+            logger.info("Inspector started")
+        except Exception as e:
+            logger.error(f"Inspector init failed (K8s unavailable?): {e}")
+    yield
+    if _inspector_task:
+        _inspector_task.cancel()
+
+
+app = FastAPI(title="K8s Ops Agent API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -20,9 +64,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-_sessions: dict = {}
-_pending: dict = {}   # session_id → {tool_name, tool_input, tool_id, description}
 
 
 def _get_agent(session_id: str):
@@ -67,7 +108,7 @@ def chat(req: ChatRequest):
     if req.session_id in _pending:
         desc = _pending[req.session_id]["description"]
         return ChatResponse(
-            reply=f"⚠️ 有待确认的危险操作，请先处理后再发送新消息。",
+            reply="⚠️ 有待确认的危险操作，请先处理后再发送新消息。",
             session_id=req.session_id,
             pending_action={"description": desc},
         )
@@ -130,3 +171,32 @@ def reset(session_id: str):
         _sessions[session_id].reset()
     _pending.pop(session_id, None)
     return {"ok": True}
+
+
+@app.get("/api/alerts/stream")
+async def alerts_stream():
+    """SSE endpoint — pushes inspector alerts to the frontend in real time."""
+    if _inspector is None:
+        async def disabled():
+            yield 'data: {"type":"disabled"}\n\n'
+        return StreamingResponse(disabled(), media_type="text/event-stream")
+
+    queue = _inspector.subscribe()
+
+    async def generate():
+        try:
+            yield 'data: {"type":"connected"}\n\n'
+            while True:
+                try:
+                    alert = await asyncio.wait_for(queue.get(), timeout=25)
+                    yield f"data: {json.dumps(alert, ensure_ascii=False)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"   # keep connection alive
+        finally:
+            _inspector.unsubscribe(queue)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

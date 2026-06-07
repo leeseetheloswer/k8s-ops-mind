@@ -25,6 +25,10 @@ k8s-ops-agent/
 ├── utils/
 │   ├── logger.py            # Rich 日志
 │   └── json_util.py         # json dumps 封装，处理 datetime 序列化
+├── inspector/
+│   ├── checks.py            # 各项检测函数（Pod restarts / Deployment ready / Warning events / Node）
+│   ├── inspector.py         # 调度循环、去重、LLM 诊断、SSE 广播、notifier 分发
+│   └── notifier.py          # AlertNotifier Protocol + LogNotifier；微信/飞书 webhook 扩展点
 ├── k8s/
 │   ├── client.py            # K8s 连接层（kubeconfig / in-cluster 自动选择）
 │   └── operations.py        # 所有 K8s 操作的真实实现
@@ -54,6 +58,7 @@ k8s-ops-agent/
 - Web 模式：FastAPI 后端 + React 前端，消息记录持久化到 localStorage
 - CLI 模式：Rich 交互终端
 - 危险操作（删除、扩缩容、apply manifest）有两阶段确认机制
+- 后端定时巡检，通过 SSE 推送告警到前端（橙色告警气泡，与对话消息区分）
 
 ## 危险操作确认机制
 
@@ -68,6 +73,21 @@ k8s-ops-agent/
 **history 回滚是关键**：抛异常前必须 `self.history.pop()` 撤回 assistant 消息，否则下次请求时 history 结构非法（assistant tool_calls 后没有 tool 消息），导致 API 400 错误。
 
 有 pending 时，新的 `/api/chat` 请求会被服务端直接拦截，不会污染 history。
+
+## 巡检机制
+
+`Inspector` 作为 asyncio 后台任务随 FastAPI lifespan 启动，每隔 `INSPECTOR_INTERVAL`（默认 60s）执行一轮：
+
+1. **checks.py** 中各检测函数并行采集异常：Pod 重启次数、Deployment ready < desired、Warning 事件、Node NotReady
+2. 用 `{kind}:{namespace}:{name}:{check_type}` 为 key 去重，冷却窗口内同一资源只告警一次
+3. 对每个新异常构造诊断 prompt，通过 `run_in_executor` 在线程池调 LLM 诊断
+4. 生成告警 dict → SSE 广播给所有已连接的前端客户端 → 触发 notifier 列表
+
+**扩展 webhook**：在 `inspector/notifier.py` 实现 `AlertNotifier` Protocol，然后 `Inspector(notifiers=[..., YourNotifier()])` 传入即可。
+
+**新增检测项**：在 `inspector/checks.py` 写函数返回 `list[Anomaly]`，加入 `ALL_CHECKS` 列表。
+
+**前端告警**：`role='alert'` 消息渲染为橙色左侧边框气泡，与普通对话气泡明显区分。
 
 ## 关键约定
 

@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     k8s_namespace: str = "default"
     log_level: str = "INFO"
 
+    # Inspector
+    inspector_enabled: bool = True
+    inspector_interval: int = 60          # seconds between check rounds
+    inspector_cooldown_minutes: int = 30  # suppress same alert within this window
+    inspector_restart_threshold: int = 3  # pod restart count to trigger alert
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
     @model_validator(mode="after")
